@@ -95,6 +95,9 @@ namespace UnitySkills
         // Statistics
         private static long _totalRequestsProcessed = 0;
         private static long _totalRequestsReceived = 0;
+
+        // Startup diagnostic: counts ProcessJobQueue ticks since Start() for self-test diagnostics
+        private static volatile int _pjqTicksSinceStart = -1;
         
         // Keep Unicode readable instead of forcing escaped sequences.
         private static readonly JsonSerializerSettings _jsonSettings = new JsonSerializerSettings
@@ -607,6 +610,9 @@ namespace UnitySkills
                 _lastHeartbeatTime = EditorApplication.timeSinceStartup;
                 _lastWatchdogCheck = EditorApplication.timeSinceStartup;
 
+                // Start diagnostic counter for self-test
+                _pjqTicksSinceStart = 0;
+
                 // Force an immediate update so ProcessJobQueue starts processing as soon as possible
                 EditorApplication.QueuePlayerLoopUpdate();
 
@@ -808,11 +814,10 @@ namespace UnitySkills
                             }
                         }
 
-                        // Wait for main thread to process (with timeout)
-                        // This is thread-safe - just waiting on a signal
-                        ThreadPool.QueueUserWorkItem(_ => WaitAndRespond(job));
+                        // Queue the responder with an explicit state object to avoid closure-capture races.
+                        ThreadPool.QueueUserWorkItem(WaitAndRespondCallback, job);
                         handedOffToResponder = true;
-                        job = null; // Ownership transferred to WaitAndRespond
+                        job = null; // Prevent finally from returning to pool (ownership transferred to WaitAndRespond)
                     }
                     finally
                     {
@@ -840,8 +845,25 @@ namespace UnitySkills
         /// Waits for job completion and sends HTTP response.
         /// Runs on ThreadPool thread - NO Unity API calls.
         /// </summary>
+        private static void WaitAndRespondCallback(object state)
+        {
+            if (state is RequestJob job)
+            {
+                WaitAndRespond(job);
+                return;
+            }
+
+            SkillsLogger.LogWarning("WaitAndRespond callback received invalid state.");
+        }
+
         private static void WaitAndRespond(RequestJob job)
         {
+            if (job == null)
+            {
+                SkillsLogger.LogWarning("WaitAndRespond received a null request job.");
+                return;
+            }
+
             bool completed = false;
             try
             {
@@ -922,6 +944,11 @@ namespace UnitySkills
         /// </summary>
         private static void ProcessJobQueue()
         {
+            // Startup diagnostic counter (lightweight volatile increment, stops at 10000)
+            var diagTick = _pjqTicksSinceStart;
+            if (diagTick >= 0 && diagTick < 10000)
+                _pjqTicksSinceStart = diagTick + 1;
+
             int processed = 0;
             const int maxPerFrame = 20; // Process more per frame for high throughput
             
@@ -1096,33 +1123,89 @@ namespace UnitySkills
         {
             if (!_isRunning) return;
             int port = _port;
+            int pjqTicks = _pjqTicksSinceStart;
+            SkillsLogger.Log($"[Self-Test] Starting (ProcessJobQueue ticks={pjqTicks}, listener={_listener?.IsListening})");
+
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                // Brief pause to let the KeepAlive thread and update loop fully stabilize
-                Thread.Sleep(500);
-
-                // 1. Reachability test
+                // 1. Reachability test with retry using raw TCP (bypasses .NET HTTP client stack entirely)
                 var hosts = new[] { "localhost", "127.0.0.1" };
                 foreach (var host in hosts)
                 {
+                    if (!_isRunning) return;
+
                     string url = $"http://{host}:{port}/health";
-                    try
+                    bool success = false;
+                    string lastError = null;
+
+                    for (int attempt = 1; attempt <= 3 && !success && _isRunning; attempt++)
                     {
-                        var req = (HttpWebRequest)WebRequest.Create(url);
-                        req.Timeout = 8000;
-                        req.Proxy = null; // Bypass system proxy — 127.0.0.1 is often not in proxy bypass list on Windows
-                        using (var resp = (HttpWebResponse)req.GetResponse())
+                        if (attempt > 1) Thread.Sleep(attempt * 1500); // 3s, 4.5s backoff
+
+                        try
                         {
-                            if (resp.StatusCode == HttpStatusCode.OK)
-                                SkillsLogger.LogSuccess($"[Self-Test] {url} -> OK");
-                            else
-                                SkillsLogger.LogWarning($"[Self-Test] {url} -> HTTP {(int)resp.StatusCode}");
+                            using (var tcp = new System.Net.Sockets.TcpClient())
+                            {
+                                // Async connect with timeout
+                                var ar = tcp.BeginConnect(host, port, null, null);
+                                if (!ar.AsyncWaitHandle.WaitOne(3000))
+                                {
+                                    tcp.Close();
+                                    lastError = "TCP connect timed out";
+                                    continue;
+                                }
+                                tcp.EndConnect(ar);
+
+                                tcp.ReceiveTimeout = 5000;
+                                tcp.SendTimeout = 2000;
+
+                                var stream = tcp.GetStream();
+
+                                // Send raw HTTP/1.0 request — bypasses proxy, WinHTTP, ServicePoint
+                                var httpReq = $"GET /health HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n";
+                                var reqBytes = Encoding.ASCII.GetBytes(httpReq);
+                                stream.Write(reqBytes, 0, reqBytes.Length);
+
+                                // Read response
+                                var sb = new StringBuilder();
+                                var buf = new byte[4096];
+                                int read;
+                                while ((read = stream.Read(buf, 0, buf.Length)) > 0)
+                                    sb.Append(Encoding.UTF8.GetString(buf, 0, read));
+
+                                var response = sb.ToString();
+                                if (response.Contains("200") && response.Contains("\"status\""))
+                                {
+                                    SkillsLogger.LogSuccess($"[Self-Test] {url} -> OK");
+                                    success = true;
+                                }
+                                else if (response.Length > 0)
+                                {
+                                    // Got a response (e.g., 400 Bad Request from HTTP.sys) — server is reachable
+                                    var firstLine = response.Split('\n')[0].Trim();
+                                    SkillsLogger.LogWarning($"[Self-Test] {url} -> {firstLine}");
+                                    success = true;
+                                }
+                                else
+                                {
+                                    lastError = "Empty response";
+                                }
+                            }
+                        }
+                        catch (Exception ex) when (attempt < 3)
+                        {
+                            lastError = ex.InnerException?.Message ?? ex.Message;
+                        }
+                        catch (Exception ex)
+                        {
+                            lastError = ex.InnerException?.Message ?? ex.Message;
                         }
                     }
-                    catch (Exception ex)
+
+                    if (!success)
                     {
-                        SkillsLogger.LogWarning($"[Self-Test] {url} -> FAILED: {ex.Message}");
-                        SkillsLogger.LogWarning($"[Self-Test] Check firewall/antivirus settings.");
+                        SkillsLogger.LogWarning($"[Self-Test] {url} -> FAILED after 3 attempts: {lastError}");
+                        SkillsLogger.LogWarning($"[Self-Test] Main thread may be busy (PJQ ticks={_pjqTicksSinceStart}). External clients can connect once editor is responsive.");
                     }
                 }
 
@@ -1130,19 +1213,18 @@ namespace UnitySkills
                 var occupied = new List<string>();
                 for (int p = 8090; p <= 8100; p++)
                 {
-                    if (p == port) continue; // skip our own port
+                    if (p == port) continue;
                     try
                     {
-                        var req = (HttpWebRequest)WebRequest.Create($"http://127.0.0.1:{p}/");
-                        req.Timeout = 500;
-                        req.Proxy = null;
-                        using (req.GetResponse()) { }
-                        occupied.Add(p.ToString());
-                    }
-                    catch (WebException wex) when (wex.Response != null)
-                    {
-                        // Got an HTTP response (even if error) = port is occupied
-                        occupied.Add(p.ToString());
+                        using (var tcp = new System.Net.Sockets.TcpClient())
+                        {
+                            var ar = tcp.BeginConnect("127.0.0.1", p, null, null);
+                            if (ar.AsyncWaitHandle.WaitOne(500))
+                            {
+                                tcp.EndConnect(ar);
+                                occupied.Add(p.ToString());
+                            }
+                        }
                     }
                     catch { /* Connection refused = port is free */ }
                 }
