@@ -240,12 +240,12 @@ namespace UnitySkills
                             ["hint"] = "Result is truncated. To see all items, pass 'verbose=true' parameter."
                         };
                         
-                        return JsonConvert.SerializeObject(new { status = "success", result = wrapper }, _jsonSettings);
+                        return SerializeSuccessResponse(wrapper);
                     }
                 }
                 
                 // Full Mode (verbose=true OR small result) - Return original result as is
-                return JsonConvert.SerializeObject(new { status = "success", result }, _jsonSettings);
+                return SerializeSuccessResponse(result);
             }
             catch (TargetInvocationException ex)
             {
@@ -277,6 +277,30 @@ namespace UnitySkills
                     error = $"[Transactional Revert] {ex.Message}" 
                 }, _jsonSettings);
             }
+        }
+
+        private static string SerializeSuccessResponse(object result)
+        {
+            if (ServerAvailabilityHelper.IsCompilationInProgress())
+            {
+                try
+                {
+                    var jsonResult = JToken.FromObject(result ?? new object());
+                    if (jsonResult is JObject obj && !obj.ContainsKey("serverAvailability"))
+                    {
+                        var notice = ServerAvailabilityHelper.CreateTransientUnavailableNotice(
+                            "A skill execution may have triggered compilation or asset refresh.",
+                            alwaysInclude: true);
+                        if (notice != null)
+                        {
+                            obj["serverAvailability"] = JToken.FromObject(notice);
+                            return JsonConvert.SerializeObject(new { status = "success", result = obj }, _jsonSettings);
+                        }
+                    }
+                }
+                catch { /* 注入失败不影响正常返回 */ }
+            }
+            return JsonConvert.SerializeObject(new { status = "success", result }, _jsonSettings);
         }
 
         public static void Refresh()

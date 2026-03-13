@@ -112,7 +112,9 @@ namespace UnitySkills
         private static string PREF_AUTO_START => PrefKey("AutoStart");
         private static string PREF_TOTAL_PROCESSED => PrefKey("TotalProcessed");
         private static string PREF_LAST_PORT => PrefKey("LastPort");
-        
+        private static string PREF_CONSECUTIVE_FAILURES => PrefKey("ConsecutiveRestartFailures");
+        private const int MaxConsecutiveFailures = 5;
+
         // Domain Reload tracking
         private static bool _domainReloadPending = false;
 
@@ -381,8 +383,12 @@ namespace UnitySkills
         {
             _domainReloadPending = true;
 
-            // Persist the "should run" state before domain is destroyed
-            EditorPrefs.SetBool(PREF_SERVER_SHOULD_RUN, _isRunning);
+            // 关键修复：仅在服务器正在运行时写入 true
+            // 当 _isRunning=false（前次重启失败），不覆写——保留已有的 true 意图
+            if (_isRunning)
+            {
+                EditorPrefs.SetBool(PREF_SERVER_SHOULD_RUN, true);
+            }
 
             // Persist statistics
             EditorPrefs.SetString(PREF_TOTAL_PROCESSED, _totalRequestsProcessed.ToString());
@@ -436,6 +442,7 @@ namespace UnitySkills
         {
             // Always clear on quit - we don't want auto-start on next Unity session
             EditorPrefs.SetBool(PREF_SERVER_SHOULD_RUN, false);
+            EditorPrefs.SetInt(PREF_CONSECUTIVE_FAILURES, 0);
             Stop();
         }
         
@@ -456,12 +463,28 @@ namespace UnitySkills
 
             if (shouldRun && autoStart && !_isRunning)
             {
+                int failures = EditorPrefs.GetInt(PREF_CONSECUTIVE_FAILURES, 0);
+                if (failures >= MaxConsecutiveFailures)
+                {
+                    SkillsLogger.LogError(
+                        $"[UnitySkills] Server restart abandoned after {failures} consecutive failures across Domain Reloads.\n" +
+                        "Please restart manually: Window > UnitySkills > Start Server");
+                    EditorPrefs.SetBool(PREF_SERVER_SHOULD_RUN, false);
+                    _restoreRetryCount = 0;
+                    return;
+                }
+
                 int lastPort = EditorPrefs.GetInt(PREF_LAST_PORT, 0);
                 int restorePort = (lastPort >= 8090 && lastPort <= 8100) ? lastPort : PreferredPort;
-                SkillsLogger.Log($"Auto-restoring server after Domain Reload (port={restorePort}, attempt {_restoreRetryCount + 1}/{MaxRestoreRetries + 1})...");
+                SkillsLogger.Log($"Auto-restoring server after Domain Reload (port={restorePort}, attempt {_restoreRetryCount + 1}/{MaxRestoreRetries + 1}, consecutive failures={failures})...");
                 Start(restorePort, fallbackToAuto: true);
 
-                if (!_isRunning && _restoreRetryCount < MaxRestoreRetries)
+                if (_isRunning)
+                {
+                    // 启动成功（failures 已在 Start() 中清零）
+                    _restoreRetryCount = 0;
+                }
+                else if (_restoreRetryCount < MaxRestoreRetries)
                 {
                     double delay = RestoreRetryDelays[_restoreRetryCount];
                     _restoreRetryCount++;
@@ -469,7 +492,12 @@ namespace UnitySkills
                 }
                 else
                 {
+                    // 本轮所有重试耗尽
                     _restoreRetryCount = 0;
+                    EditorPrefs.SetInt(PREF_CONSECUTIVE_FAILURES, failures + 1);
+                    SkillsLogger.LogError(
+                        $"[UnitySkills] Server failed to restart (consecutive failures: {failures + 1}/{MaxConsecutiveFailures}). " +
+                        "Will retry on next Domain Reload. Manual start: Window > UnitySkills > Start Server");
                 }
             }
             else
@@ -588,6 +616,7 @@ namespace UnitySkills
 
                 // Persist state for Domain Reload recovery
                 EditorPrefs.SetBool(PREF_SERVER_SHOULD_RUN, true);
+                EditorPrefs.SetInt(PREF_CONSECUTIVE_FAILURES, 0); // 成功启动，清除失败计数
 
                 // Register to global registry
                 RegistryService.Register(_port);
@@ -623,7 +652,7 @@ namespace UnitySkills
             {
                 SkillsLogger.LogError($"Failed to start: {ex.Message}");
                 _isRunning = false;
-                EditorPrefs.SetBool(PREF_SERVER_SHOULD_RUN, false);
+                // 不清除 PREF_SERVER_SHOULD_RUN — 保留重启意图，下次 Reload 继续尝试
             }
         }
 
@@ -636,6 +665,7 @@ namespace UnitySkills
             if (permanent)
             {
                 EditorPrefs.SetBool(PREF_SERVER_SHOULD_RUN, false);
+                EditorPrefs.SetInt(PREF_CONSECUTIVE_FAILURES, 0);
             }
 
             // Unregister from global registry
@@ -875,9 +905,19 @@ namespace UnitySkills
                     job.StatusCode = 504;
                     job.ResponseJson = JsonConvert.SerializeObject(new {
                         error = $"Gateway Timeout: Main thread did not respond within {RequestTimeoutMs / 1000} seconds",
+                        diagnostics = new {
+                            domainReloadPending = _domainReloadPending,
+                            queuedRequests = QueuedRequests,
+                            listenerAlive = _listenerThread?.IsAlive ?? false,
+                            keepAliveAlive = _keepAliveThread?.IsAlive ?? false,
+                        },
                         suggestion = _domainReloadPending
                             ? "Unity is reloading scripts. Wait a few seconds and retry."
-                            : "Unity Editor may be paused or showing a modal dialog"
+                            : "Unity Editor may be paused, showing a modal dialog, or processing a long operation. " +
+                              "Please check the Unity Editor window for any dialogs or errors.",
+                        manualAction = "If the server is unresponsive, restart via: Window > UnitySkills > Start Server",
+                        retryAfterSeconds = _domainReloadPending ? 5 : 10,
+                        retryStrategy = "wait_and_retry"
                     }, _jsonSettings);
                 }
                 
@@ -1015,6 +1055,16 @@ namespace UnitySkills
                         Stop();
                         Start(port, fallbackToAuto: true);
                     }
+                    else
+                    {
+                        bool keepAliveDead = _keepAliveThread == null || !_keepAliveThread.IsAlive;
+                        if (keepAliveDead)
+                        {
+                            SkillsLogger.LogWarning("Watchdog: keep-alive thread died, restarting...");
+                            _keepAliveThread = new Thread(KeepAliveLoop) { IsBackground = true, Name = "UnitySkills-KeepAlive" };
+                            _keepAliveThread.Start();
+                        }
+                    }
                 }
             }
         }
@@ -1052,6 +1102,19 @@ namespace UnitySkills
                     requestTimeoutMinutes = RequestTimeoutMinutes,
                     domainReloadRecovery = "enabled",
                     architecture = "Producer-Consumer (Thread-Safe)",
+                    threads = new {
+                        listenerAlive = _listenerThread?.IsAlive ?? false,
+                        keepAliveAlive = _keepAliveThread?.IsAlive ?? false,
+                    },
+                    compilation = new {
+                        isCompiling = EditorApplication.isCompiling,
+                        isUpdating = EditorApplication.isUpdating,
+                        domainReloadPending = _domainReloadPending,
+                    },
+                    queueStats = new {
+                        queued = QueuedRequests,
+                        totalReceived = _totalRequestsReceived,
+                    },
                     note = "If you get 'Connection Refused', Unity may be reloading scripts. Wait 2-3 seconds and retry."
                 }, _jsonSettings);
                 return;
@@ -1073,8 +1136,14 @@ namespace UnitySkills
                     job.StatusCode = 503;
                     job.ResponseJson = JsonConvert.SerializeObject(new {
                         error = "Unity is compiling or reloading scripts",
+                        diagnostics = new {
+                            isCompiling = EditorApplication.isCompiling,
+                            isUpdating = EditorApplication.isUpdating,
+                            domainReloadPending = _domainReloadPending,
+                        },
                         suggestion = "The REST server is temporarily unavailable during compilation. Wait a few seconds and retry.",
-                        retryAfterSeconds = 5,
+                        manualAction = "If this persists, check Unity Editor for compilation errors or stuck dialogs.",
+                        retryAfterSeconds = _domainReloadPending ? 8 : 5,
                         retryStrategy = "wait_and_retry"
                     }, _jsonSettings);
                     return;
