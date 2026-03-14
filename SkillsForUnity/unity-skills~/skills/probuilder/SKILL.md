@@ -262,30 +262,20 @@ Center the pivot point or move it to a specific world position.
 
 ---
 
-## Example: Build a Table
+## Quick Example: Table (0.8m tall)
 
 ```python
-import unity_skills
-
-# Create table top
+# Table top: 1.2×0.6m surface at 0.8m height, 0.05m thick
+# y = 0.8 - 0.05/2 = 0.775 (center of slab, top surface at 0.8m)
 unity_skills.call_skill("probuilder_create_shape",
-    shape="Cube", name="TableTop",
-    sizeX=2, sizeY=0.1, sizeZ=1, y=1)
+    shape="Cube", name="TableTop", sizeX=1.2, sizeY=0.05, sizeZ=0.6, y=0.775)
 
-# Create 4 legs
-for i, (lx, lz) in enumerate([(-0.8, -0.4), (0.8, -0.4), (-0.8, 0.4), (0.8, 0.4)]):
+# 4 legs: 0.04m thick, 0.75m tall (table top bottom at 0.75)
+# y = 0.75/2 = 0.375 (centered vertically)
+for i, (lx, lz) in enumerate([(-0.5,-0.22), (0.5,-0.22), (-0.5,0.22), (0.5,0.22)]):
     unity_skills.call_skill("probuilder_create_shape",
-        shape="Cylinder", name=f"Leg_{i}",
-        sizeX=0.08, sizeY=1, sizeZ=0.08,
-        x=lx, y=0.5, z=lz)
-
-# Bevel the table top edges for a softer look
-unity_skills.call_skill("probuilder_bevel_edges",
-    name="TableTop", amount=0.15)
-
-# Assign wood material to all faces
-unity_skills.call_skill("probuilder_set_face_material",
-    name="TableTop", materialPath="Assets/Materials/Wood.mat")
+        shape="Cylinder", name=f"Leg_{i}", sizeX=0.04, sizeY=0.75, sizeZ=0.04,
+        x=lx, y=0.375, z=lz)
 ```
 
 ---
@@ -424,92 +414,147 @@ unity_skills.call_skill("probuilder_set_material", name="Ramp", r=0.8, g=0.4, b=
 
 ---
 
-## Level Design Spatial Reference
+## Scene Design Guide
 
-> **1 Unity unit = 1 meter.** Use these references when designing levels.
+> This section teaches **how to design** any 3D scene, not a fixed template. Follow these principles to generate correct, playable geometry from any user description.
 
-| Element | Value | Notes |
-|---------|-------|-------|
-| Player height | 2m | Standard capsule (radius 0.5, height 2) |
-| Player width | 1m | Capsule diameter |
-| Walk speed | ~4 m/s | Typical CharacterController |
-| Jump height | ~1.2m | Standard gravity (-9.81), jumpForce ~5 |
-| Max jump gap (horizontal) | ~3m | Running jump at walk speed |
-| Comfortable step-up | ≤0.3m | No jump needed |
-| Min platform width | 1.5m | Comfortable landing |
-| Min corridor width | 2m | Player + clearance |
-| Door opening | W 1.5m × H 2.5m | Standard interior |
-| Wall thickness | 0.2–0.5m | Thin = partition, thick = structural |
-| Railing/ledge height | 1m | Waist height |
-| Stair step | W 0.3m × H 0.2m | Per tread |
-| Floor thickness | 0.2–0.5m | Visible slab |
+### Step 1: Spatial Planning (Think Before Building)
 
-**Reachability rules for parkour:**
-- Vertical gap between platforms: ≤1.0m (jumpable), >1.2m = unreachable
-- Horizontal gap: ≤2.5m (safe), 2.5–3.5m (challenging), >4m = unreachable
-- Progressive height: each step ≤1m higher than previous
-- Always provide a path back or forward — no dead ends without intention
+**1 Unity unit = 1 meter.** Always plan on paper/ASCII first.
 
-## Example: Parkour Level
+| Human Reference | Size | Use For |
+|----------------|------|---------|
+| Person standing | H 1.8m | Doorways ≥ 2.2m, ceilings ≥ 2.5m |
+| Shoulder width | W 0.5m | Corridors ≥ 1.5m, doors ≥ 0.9m |
+| Single step | H 0.18m, D 0.28m | Stairs: rise/run ratio |
+| Dining table | 1.5×0.8m, H 0.75m | Furniture scale reference |
+| Car | 4.5×1.8m, H 1.5m | Parking, roads ≥ 3.5m/lane |
+| Single room | 4×4m | Interior spaces |
+| Story height | 3m (floor-to-floor) | Multi-story buildings |
 
+**Gameplay references:**
+
+| Mechanic | Comfortable | Challenging | Impossible |
+|----------|------------|-------------|------------|
+| Jump height (vertical) | ≤ 1.0m | 1.0–1.2m | > 1.5m |
+| Jump gap (horizontal) | ≤ 2.5m | 2.5–3.5m | > 4m |
+| Step-up (no jump) | ≤ 0.3m | — | > 0.5m |
+| Platform landing zone | ≥ 2m | 1.5m | < 1m |
+| Drop without damage | ≤ 3m | 3–5m | > 8m |
+
+### Step 2: Layout First, Details Later
+
+**Workflow:**
+1. **Root object** → `gameobject_create` as parent for the entire scene
+2. **Blockout** → `probuilder_create_batch` for all major volumes (floors, walls, platforms)
+3. **Connectivity check** → verify every platform is reachable from the previous one
+4. **Shape refinement** → `move_vertices` for ramps/slopes, `extrude_faces` for ledges, `bevel_edges` for polish
+5. **Material pass** → `set_material` with distinct colors per functional role
+6. **Iteration** → user reviews, AI adjusts positions/sizes
+
+### Step 3: Positioning Rules
+
+**Y-axis = height (up), X/Z = horizontal ground plane.**
+
+- `y` in parameters is the **center** of the shape, not the bottom
+- A floor with `sizeY=0.3` at `y=0` has its top surface at `y=0.15`
+- To place a floor with top surface at y=0: set `y = -sizeY/2`
+- To stack object B on top of object A: `B.y = A.y + A.sizeY/2 + B.sizeY/2`
+
+**Connectivity checklist for platformers:**
+- Adjacent platforms: horizontal gap ≤ 2.5m AND vertical gap ≤ 1.0m
+- Stairs: top surface aligns with next platform's top surface
+- Ramps: low end at current ground level, high end at target platform level
+- Bridges: same Y as the platforms they connect
+- Pillars: `y = pillarHeight/2` (centered), `sizeY = pillarHeight`
+
+### Step 4: Common Patterns
+
+**Floor/Ground:** `sizeY=0.2~0.5`, generous X/Z
+**Wall:** thin on one axis (`sizeZ=0.2~0.3`), tall Y, offset to edge of floor
+**Pillar:** `Cylinder`, small X/Z (`0.3~0.6`), tall Y, `y = height/2`
+**Ramp:** `Cube` + `move_vertices` — lower one side's top vertices
+**Staircase:** `Stairs` shape — sizeY = total rise, sizeZ = total run
+**Bridge:** thin Cube (`sizeY=0.15~0.2`), narrow Z, long X between supports
+**Doorway:** two walls with gap, or `Arch` shape
+**Room:** 4 walls + floor + ceiling, each as separate Cube
+
+### Step 4b: Furniture & Props — Multi-Part Assembly
+
+> **Golden Rule**: Real furniture is NEVER a single box. Decompose every object into its visible structural parts.
+
+**Decomposition method** — ask "what would I see if I looked at this object?":
+- **Desk** = 1 tabletop (thin slab) + 4 legs (tall thin cylinders/cubes)
+- **Chair** = 1 seat (thin slab) + 4 legs + 1 backrest (thin tall slab)
+- **Shelf** = 2 side panels + N shelves + optional back panel
+- **Door** = 1 panel in the door frame
+- **Window** = frame (4 thin cubes) + optional glass pane (Plane or thin Cube with transparent material)
+- **Monitor** = screen slab + stand post + base plate
+- **Bed** = mattress slab + headboard + 4 short legs
+
+**Assembly pattern (parent → children):**
 ```python
-import unity_skills
+# Create parent for the furniture piece
+unity_skills.call_skill("gameobject_create", name="Desk_0")
 
-# 1. Create level root
-unity_skills.call_skill("gameobject_create", name="ParkourLevel")
-
-# 2. Batch create all geometry
-# Layout (side view, X = forward):
-#
-#   Start                                           Finish
-#   [Ground]--[Stairs]--[Plat1]--[Plat2]--[Ramp]--[Bridge]--[EndPlat]--[Arch]
-#   y=0        y=0→2     y=2.5    y=3.2    y=0→4    y=4       y=5       y=5
-#   x=-10      x=-6      x=-2     x=2      x=6      x=11     x=16      x=16
-#
-unity_skills.call_skill("probuilder_create_batch", defaultParent="ParkourLevel", items=[
-    # Ground floor — wide flat area for spawn
-    {"shape": "Cube", "name": "Ground",    "sizeX": 8, "sizeY": 0.3, "sizeZ": 8, "x": -10, "y": -0.15},
-    # Side walls for ground area
-    {"shape": "Cube", "name": "Wall_L",    "sizeX": 8, "sizeY": 3, "sizeZ": 0.3, "x": -10, "y": 1.5, "z": -4},
-    {"shape": "Cube", "name": "Wall_R",    "sizeX": 8, "sizeY": 3, "sizeZ": 0.3, "x": -10, "y": 1.5, "z": 4},
-    # Stairs up (2m rise over 4m run)
-    {"shape": "Stairs", "name": "Stairs_1", "sizeX": 2, "sizeY": 2, "sizeZ": 4, "x": -6, "y": 1},
-    # Platform 1 — first landing (reachable from stairs top at y=2)
-    {"shape": "Cube", "name": "Plat_1",   "sizeX": 3, "sizeY": 0.3, "sizeZ": 3, "x": -2, "y": 2.5},
-    # Platform 2 — small hop up (+0.7m, gap 1.5m)
-    {"shape": "Cube", "name": "Plat_2",   "sizeX": 2, "sizeY": 0.3, "sizeZ": 2, "x": 2, "y": 3.2},
-    # Ramp base — slope from ground to bridge height
-    {"shape": "Cube", "name": "Ramp_1",   "sizeX": 2, "sizeY": 4, "sizeZ": 3, "x": 6, "y": 2},
-    # Bridge — narrow walkway connecting ramp to end (y=4)
-    {"shape": "Cube", "name": "Bridge",   "sizeX": 6, "sizeY": 0.2, "sizeZ": 1.5, "x": 11, "y": 4},
-    # Support pillars under bridge
-    {"shape": "Cylinder", "name": "Pillar_1", "sizeX": 0.4, "sizeY": 4, "sizeZ": 0.4, "x": 8.5, "y": 2},
-    {"shape": "Cylinder", "name": "Pillar_2", "sizeX": 0.4, "sizeY": 4, "sizeZ": 0.4, "x": 13.5, "y": 2},
-    # End platform — generous landing zone
-    {"shape": "Cube", "name": "Plat_End", "sizeX": 4, "sizeY": 0.3, "sizeZ": 4, "x": 16, "y": 5},
-    # Finish arch
-    {"shape": "Arch", "name": "Finish_Arch", "sizeX": 4, "sizeY": 3, "sizeZ": 1, "x": 16, "y": 6.5},
+# Build parts as children — all positions relative to parent
+unity_skills.call_skill("probuilder_create_batch", defaultParent="Desk_0", items=[
+    # Tabletop: 1.2m × 0.04m × 0.6m, top surface at 0.75m
+    {"shape":"Cube", "name":"Desk_0_Top", "sizeX":1.2, "sizeY":0.04, "sizeZ":0.6, "y":0.73},
+    # 4 Legs: 0.04m × 0.71m × 0.04m each, centered under corners
+    {"shape":"Cube", "name":"Desk_0_Leg_FL", "sizeX":0.04, "sizeY":0.71, "sizeZ":0.04, "x":-0.55, "y":0.355, "z":0.25},
+    {"shape":"Cube", "name":"Desk_0_Leg_FR", "sizeX":0.04, "sizeY":0.71, "sizeZ":0.04, "x":0.55,  "y":0.355, "z":0.25},
+    {"shape":"Cube", "name":"Desk_0_Leg_BL", "sizeX":0.04, "sizeY":0.71, "sizeZ":0.04, "x":-0.55, "y":0.355, "z":-0.25},
+    {"shape":"Cube", "name":"Desk_0_Leg_BR", "sizeX":0.04, "sizeY":0.71, "sizeZ":0.04, "x":0.55,  "y":0.355, "z":-0.25},
 ])
-
-# 3. Turn Ramp_1 into slope by moving top-front vertices down
-verts = unity_skills.call_skill("probuilder_get_vertices", name="Ramp_1")
-# Find top-front vertices (y > 0 and z > 0 in local space) and lower them
-top_front = [v["index"] for v in verts.get("vertices", []) if v["y"] > 0 and v["z"] > 0]
-if top_front:
-    unity_skills.call_skill("probuilder_move_vertices",
-        name="Ramp_1", vertexIndexes=",".join(str(i) for i in top_front), deltaY=-3.5)
-
-# 4. Color everything for visual distinction
-for name, rgb in [
-    ("Ground", (0.35, 0.35, 0.35)), ("Wall_L", (0.5, 0.5, 0.55)),
-    ("Wall_R", (0.5, 0.5, 0.55)),   ("Stairs_1", (0.6, 0.5, 0.3)),
-    ("Plat_1", (0.2, 0.6, 0.9)),    ("Plat_2", (0.15, 0.5, 0.85)),
-    ("Ramp_1", (0.9, 0.5, 0.1)),    ("Bridge", (0.6, 0.4, 0.2)),
-    ("Pillar_1", (0.65, 0.65, 0.65)),("Pillar_2", (0.65, 0.65, 0.65)),
-    ("Plat_End", (0.1, 0.75, 0.3)), ("Finish_Arch", (1, 0.8, 0)),
-]:
-    unity_skills.call_skill("probuilder_set_material", name=name, r=rgb[0], g=rgb[1], b=rgb[2])
 ```
+
+**Common furniture dimensions:**
+
+| Furniture | Typical Size (W×D×H) | Key Parts |
+|-----------|---------------------|-----------|
+| Office desk | 1.2×0.6×0.75m | Tabletop (4cm thick) + 4 legs |
+| Dining table | 1.5×0.8×0.75m | Tabletop (5cm) + 4 legs (6cm square) |
+| Chair (no arms) | 0.45×0.45×0.45m seat, 0.85m total | Seat (4cm) + 4 legs + backrest (3cm×0.4m tall) |
+| Armchair | 0.7×0.7×0.45m seat, 0.9m total | Seat + back + 2 armrests (5cm wide) |
+| Bookshelf | 0.8×0.3×1.8m | 2 sides (3cm) + 4-5 shelves (2cm) |
+| Bed (single) | 0.9×2.0×0.45m mattress | Mattress (20cm) + frame (25cm) + headboard (60cm) |
+| Sofa | 2.0×0.8×0.45m seat, 0.85m back | Seat + back + 2 arms + base |
+| Monitor | 0.5×0.02×0.35m screen | Screen + neck (cylinder) + base (0.25×0.2m) |
+| Whiteboard | 1.5×0.03×1.0m | Board + optional frame |
+
+**Detail enhancement techniques:**
+- `bevel_edges` → **only use on chunky geometry** (sizeY ≥ 0.1m). NEVER bevel thin slabs (tabletops, shelves) — the bevel amount is relative to edge length, and on thin objects it creates ugly flared corners
+- `extrude_faces` on chair seats → create slight lip/rim
+- Different colors for same furniture → e.g. legs darker than top surface
+- Group all parts under one parent → easy to move/duplicate the whole piece
+
+**Mass production — create one, then duplicate:**
+```python
+# Build one detailed chair under "Chair_Template"
+# ... (multi-part assembly)
+
+# Duplicate to fill room
+for i, (x, z) in enumerate(seat_positions):
+    unity_skills.call_skill("gameobject_duplicate", name="Chair_Template",
+        newName=f"Chair_{i}", x=x, z=z)
+```
+
+### Step 5: Color Coding for Prototyping
+
+Use distinct colors by **function**, not by object:
+
+| Role | RGB | Visual |
+|------|-----|--------|
+| Ground/floor | (0.4, 0.4, 0.4) | Dark gray |
+| Walls | (0.6, 0.6, 0.65) | Light gray |
+| Platforms | (0.2, 0.5, 0.8) | Blue |
+| Hazard/challenge | (0.9, 0.3, 0.1) | Red-orange |
+| Ramps/slopes | (0.8, 0.6, 0.2) | Yellow-brown |
+| Goal/finish | (0.1, 0.8, 0.2) | Green |
+| Decorative | (0.5, 0.3, 0.6) | Purple |
+
+---
 
 ## Important Notes
 
@@ -521,4 +566,3 @@ for name, rgb in [
 6. **Quick color vs persistent material**: `probuilder_set_material` with `r/g/b` auto-detects render pipeline (URP/HDRP/Built-in). Use `material_create` + `materialPath` for production.
 7. **Package not installed**: All skills gracefully return `{error: "ProBuilder package not installed..."}` with install instructions.
 8. **Batch-first for level design**: Use `probuilder_create_batch` when creating 2+ shapes — one API call instead of many.
-9. **Spatial reference**: 1 unit = 1 meter. Player is 2m tall, jumps ~1.2m high, gaps ≤3m. See the reference table above.
