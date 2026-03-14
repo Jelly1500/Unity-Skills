@@ -1120,6 +1120,7 @@ namespace UnitySkills
 #endif
         }
 
+#if PROBUILDER
         private static (ProBuilderMesh mesh, object error) FindProBuilderMesh(string name, int instanceId, string path)
         {
             var (go, findErr) = GameObjectFinder.FindOrError(name, instanceId, path);
