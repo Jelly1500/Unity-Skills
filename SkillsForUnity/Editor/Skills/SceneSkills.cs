@@ -83,28 +83,53 @@ namespace UnitySkills
         {
             var scene = SceneManager.GetActiveScene();
             var roots = scene.GetRootGameObjects();
+            var hierarchy = new object[roots.Length];
+            var componentBuffer = new List<Component>(8);
+
+            for (int i = 0; i < roots.Length; i++)
+                hierarchy[i] = GetHierarchyNode(roots[i], 0, maxDepth, componentBuffer);
 
             return new
             {
                 sceneName = scene.name,
-                hierarchy = roots.Select(go => GetHierarchyNode(go, 0, maxDepth)).ToArray()
+                hierarchy
             };
         }
 
-        private static object GetHierarchyNode(GameObject go, int depth, int maxDepth)
+        private static object GetHierarchyNode(GameObject go, int depth, int maxDepth, List<Component> componentBuffer)
         {
+            var childCount = go.transform.childCount;
+            object[] children = null;
+            if (depth < maxDepth && childCount > 0)
+            {
+                children = new object[childCount];
+                for (int i = 0; i < childCount; i++)
+                    children[i] = GetHierarchyNode(go.transform.GetChild(i).gameObject, depth + 1, maxDepth, componentBuffer);
+            }
+
             var node = new
             {
                 name = go.name,
                 instanceId = go.GetInstanceID(),
-                components = go.GetComponents<Component>().Where(c => c != null).Select(c => c.GetType().Name).ToArray(),
-                children = depth < maxDepth
-                    ? Enumerable.Range(0, go.transform.childCount)
-                        .Select(i => GetHierarchyNode(go.transform.GetChild(i).gameObject, depth + 1, maxDepth))
-                        .ToArray()
-                    : null
+                components = GetComponentTypeNames(go, componentBuffer),
+                children
             };
             return node;
+        }
+
+        private static string[] GetComponentTypeNames(GameObject go, List<Component> componentBuffer)
+        {
+            componentBuffer.Clear();
+            go.GetComponents(componentBuffer);
+
+            var names = new List<string>(componentBuffer.Count);
+            foreach (var component in componentBuffer)
+            {
+                if (component != null)
+                    names.Add(component.GetType().Name);
+            }
+
+            return names.ToArray();
         }
 
         [UnitySkill("scene_screenshot", "Capture a screenshot of the game view. filename is a bare filename only (no path separators); saved under Assets/Screenshots/.")]
@@ -195,7 +220,7 @@ namespace UnitySkills
         [UnitySkill("scene_find_objects", "Search GameObjects by name pattern, tag, or component type. For advanced search (regex, layer, path) use gameobject_find.")]
         public static object SceneFindObjects(string namePattern = null, string tag = null, string componentType = null, int limit = 50)
         {
-            IEnumerable<GameObject> objects = FindHelper.FindAll<GameObject>();
+            IEnumerable<GameObject> objects = GameObjectFinder.GetSceneObjects();
 
             if (!string.IsNullOrEmpty(tag))
             {
@@ -208,15 +233,13 @@ namespace UnitySkills
 
             if (!string.IsNullOrEmpty(componentType))
             {
-                var type = System.AppDomain.CurrentDomain.GetAssemblies()
-                    .SelectMany(a => { try { return a.GetTypes(); } catch { return System.Type.EmptyTypes; } })
-                    .FirstOrDefault(t => t.Name.Equals(componentType, System.StringComparison.OrdinalIgnoreCase) && typeof(Component).IsAssignableFrom(t));
+                var type = ComponentSkills.FindComponentType(componentType);
                 if (type == null) return new { error = $"Component type not found: {componentType}" };
                 objects = objects.Where(go => go.GetComponent(type) != null);
             }
 
             var results = objects.Take(limit).Select(go => new {
-                name = go.name, path = GameObjectFinder.GetPath(go), instanceId = go.GetInstanceID(),
+                name = go.name, path = GameObjectFinder.GetCachedPath(go), instanceId = go.GetInstanceID(),
                 active = go.activeInHierarchy, tag = go.tag
             }).ToArray();
 

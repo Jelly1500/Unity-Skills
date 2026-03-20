@@ -598,14 +598,14 @@ namespace UnitySkills
                     if (results.Count >= limit) break;
 
                     var type = GetUIType(element.gameObject);
-                    if (!string.IsNullOrEmpty(uiType) && type.ToLower() != uiType.ToLower())
+                    if (!string.IsNullOrEmpty(uiType) && !string.Equals(type, uiType, StringComparison.OrdinalIgnoreCase))
                         continue;
 
                     results.Add(new
                     {
                         name = element.name,
                         instanceId = element.gameObject.GetInstanceID(),
-                        path = GameObjectFinder.GetPath(element.gameObject),
+                        path = GameObjectFinder.GetCachedPath(element.gameObject),
                         uiType = type,
                         active = element.gameObject.activeInHierarchy
                     });

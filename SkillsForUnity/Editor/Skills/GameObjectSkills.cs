@@ -227,7 +227,7 @@ namespace UnitySkills
             if (!string.IsNullOrEmpty(tag))
                 results = GameObject.FindGameObjectsWithTag(tag);
             else
-                results = FindHelper.FindAll<GameObject>();
+                results = GameObjectFinder.GetSceneObjects();
 
             // Filter by Name (Regex or Contains)
             if (!string.IsNullOrEmpty(name))
@@ -239,7 +239,7 @@ namespace UnitySkills
                 }
                 else
                 {
-                    results = results.Where(go => go.name.Contains(name));
+                    results = results.Where(go => go.name.IndexOf(name, System.StringComparison.OrdinalIgnoreCase) >= 0);
                 }
             }
             
@@ -258,10 +258,7 @@ namespace UnitySkills
             // Filter by Component
             if (!string.IsNullOrEmpty(component))
             {
-                var compType = System.Type.GetType(component) ?? 
-                    System.AppDomain.CurrentDomain.GetAssemblies()
-                        .SelectMany(a => { try { return a.GetTypes(); } catch { return new System.Type[0]; } })
-                        .FirstOrDefault(t => t.Name == component || t.FullName == component);
+                var compType = ComponentSkills.FindComponentType(component);
                 
                 if (compType != null)
                     results = results.Where(go => go.GetComponent(compType) != null);
@@ -271,7 +268,7 @@ namespace UnitySkills
             {
                 name = go.name,
                 instanceId = go.GetInstanceID(),
-                path = GameObjectFinder.GetPath(go),
+                path = GameObjectFinder.GetCachedPath(go),
                 tag = go.tag,
                 layer = LayerMask.LayerToName(go.layer),
                 position = new { x = go.transform.position.x, y = go.transform.position.y, z = go.transform.position.z }
@@ -615,22 +612,31 @@ namespace UnitySkills
             var (go, error) = GameObjectFinder.FindOrError(name, instanceId, path);
             if (error != null) return error;
 
-            var components = go.GetComponents<Component>()
-                .Where(c => c != null)
-                .Select(c => c.GetType().Name)
-                .ToArray();
+            var componentBuffer = new List<Component>(8);
+            go.GetComponents(componentBuffer);
+            var components = new List<string>(componentBuffer.Count);
+            foreach (var component in componentBuffer)
+            {
+                if (component != null)
+                    components.Add(component.GetType().Name);
+            }
 
-            var children = new List<object>();
+            var children = new List<object>(go.transform.childCount);
             foreach (Transform child in go.transform)
             {
-                children.Add(new { name = child.name, instanceId = child.gameObject.GetInstanceID() });
+                children.Add(new
+                {
+                    name = child.name,
+                    instanceId = child.gameObject.GetInstanceID(),
+                    path = GameObjectFinder.GetCachedPath(child.gameObject)
+                });
             }
 
             return new
             {
                 name = go.name,
                 instanceId = go.GetInstanceID(),
-                path = GameObjectFinder.GetPath(go),
+                path = GameObjectFinder.GetCachedPath(go),
                 tag = go.tag,
                 layer = LayerMask.LayerToName(go.layer),
                 isActive = go.activeSelf,
@@ -638,9 +644,10 @@ namespace UnitySkills
                 rotation = new { x = go.transform.eulerAngles.x, y = go.transform.eulerAngles.y, z = go.transform.eulerAngles.z },
                 scale = new { x = go.transform.localScale.x, y = go.transform.localScale.y, z = go.transform.localScale.z },
                 parent = go.transform.parent?.name,
+                parentPath = go.transform.parent != null ? GameObjectFinder.GetCachedPath(go.transform.parent.gameObject) : null,
                 childCount = go.transform.childCount,
                 children,
-                components
+                components = components.ToArray()
             };
         }
 
