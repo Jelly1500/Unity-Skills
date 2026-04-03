@@ -1181,7 +1181,8 @@ namespace UnitySkills
                 }
                 
                 // Dry-run mode: validate parameters without executing
-                if (job.QueryString != null && job.QueryString.IndexOf("dryRun=true", StringComparison.OrdinalIgnoreCase) >= 0)
+                var skillQs = SkillRouter.ParseQueryString(job.QueryString);
+                if (skillQs.TryGetValue("dryRun", out var dryRunVal) && dryRunVal.Equals("true", StringComparison.OrdinalIgnoreCase))
                 {
                     job.StatusCode = 200;
                     job.ResponseJson = SkillRouter.DryRun(skillName, job.Body);

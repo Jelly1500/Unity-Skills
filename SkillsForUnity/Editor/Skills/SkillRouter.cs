@@ -16,6 +16,7 @@ namespace UnitySkills
         private static volatile Dictionary<string, SkillInfo> _skills;
         private static volatile bool _initialized;
         private static string _cachedManifest;
+        private static Dictionary<string, List<SkillInfo>> _outputIndex;
         private static readonly object _initLock = new object();
 
         private static HashSet<string> _workflowTrackedSkills = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -124,67 +125,39 @@ namespace UnitySkills
         };
 
         /// <summary>
-        /// Expands keywords through synonym lookup. Returns deduplicated combined array.
+        /// Matches keywords against a dictionary using exact + substring matching (for unsegmented Chinese).
         /// </summary>
+        private static HashSet<TValue> MatchKeywords<TValue>(string[] keywords, Dictionary<string, TValue> map)
+        {
+            var results = new HashSet<TValue>();
+            foreach (var kw in keywords)
+            {
+                if (map.TryGetValue(kw, out var val)) results.Add(val);
+                foreach (var entry in map)
+                {
+                    if (entry.Key.Length >= 2 && kw.IndexOf(entry.Key, StringComparison.OrdinalIgnoreCase) >= 0)
+                        results.Add(entry.Value);
+                }
+            }
+            return results;
+        }
+
         private static string[] ExpandIntent(string[] keywords)
         {
             var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var kw in keywords)
+            foreach (var kw in keywords) expanded.Add(kw);
+            foreach (var synonyms in MatchKeywords(keywords, _synonymMap))
             {
-                expanded.Add(kw);
-                // Exact match
-                if (_synonymMap.TryGetValue(kw, out var synonyms))
-                {
-                    foreach (var s in synonyms) expanded.Add(s);
-                }
-                // Substring match: check if any synonym key is contained in the keyword
-                // This handles unsegmented Chinese like "创建红色方块" matching "创建", "方块" etc.
-                foreach (var entry in _synonymMap)
-                {
-                    if (entry.Key.Length >= 2 && kw.IndexOf(entry.Key, StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        foreach (var s in entry.Value) expanded.Add(s);
-                    }
-                }
+                foreach (var s in synonyms) expanded.Add(s);
             }
             return expanded.ToArray();
         }
 
-        /// <summary>
-        /// Extract matched operations from keywords using substring matching for Chinese support.
-        /// </summary>
         private static HashSet<SkillOperation> ExtractOperations(string[] keywords)
-        {
-            var ops = new HashSet<SkillOperation>();
-            foreach (var kw in keywords)
-            {
-                if (_operationKeywords.TryGetValue(kw, out var op)) ops.Add(op);
-                foreach (var entry in _operationKeywords)
-                {
-                    if (entry.Key.Length >= 2 && kw.IndexOf(entry.Key, StringComparison.OrdinalIgnoreCase) >= 0)
-                        ops.Add(entry.Value);
-                }
-            }
-            return ops;
-        }
+            => MatchKeywords(keywords, _operationKeywords);
 
-        /// <summary>
-        /// Extract matched categories from keywords using substring matching for Chinese support.
-        /// </summary>
         private static HashSet<SkillCategory> ExtractCategories(string[] keywords)
-        {
-            var cats = new HashSet<SkillCategory>();
-            foreach (var kw in keywords)
-            {
-                if (_categoryKeywords.TryGetValue(kw, out var cat)) cats.Add(cat);
-                foreach (var entry in _categoryKeywords)
-                {
-                    if (entry.Key.Length >= 2 && kw.IndexOf(entry.Key, StringComparison.OrdinalIgnoreCase) >= 0)
-                        cats.Add(entry.Value);
-                }
-            }
-            return cats;
-        }
+            => MatchKeywords(keywords, _categoryKeywords);
         // Keep Unicode readable in JSON responses instead of forcing escaped sequences.
         private static readonly JsonSerializerSettings _jsonSettings = new JsonSerializerSettings
         {
@@ -253,6 +226,24 @@ namespace UnitySkills
 
                 _skills = skills; // Atomic assignment of fully-built dictionary
                 _workflowTrackedSkills = trackedSkills;
+
+                // Build reverse index: output field → producing skills
+                var outputIdx = new Dictionary<string, List<SkillInfo>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var s in skills.Values)
+                {
+                    if (s.Outputs == null) continue;
+                    foreach (var output in s.Outputs)
+                    {
+                        if (!outputIdx.TryGetValue(output, out var list))
+                        {
+                            list = new List<SkillInfo>();
+                            outputIdx[output] = list;
+                        }
+                        list.Add(s);
+                    }
+                }
+                _outputIndex = outputIdx;
+
                 _initialized = true;
                 SkillsLogger.Log($"Discovered {_skills.Count} skills");
             }
@@ -291,7 +282,7 @@ namespace UnitySkills
                         {
                             name = p.Name,
                             type = GetJsonType(p.ParameterType),
-                            required = !p.HasDefaultValue,
+                            required = IsParameterRequired(p),
                             defaultValue = p.HasDefaultValue ? p.DefaultValue?.ToString() : null
                         })
                     })
@@ -332,7 +323,7 @@ namespace UnitySkills
                     {
                         invoke[i] = p.DefaultValue;
                     }
-                    else if (!p.ParameterType.IsValueType || Nullable.GetUnderlyingType(p.ParameterType) != null)
+                    else if (!IsParameterRequired(p))
                     {
                         invoke[i] = null;
                     }
@@ -497,6 +488,7 @@ namespace UnitySkills
                 _initialized = false;
                 _skills = null;
                 _cachedManifest = null;
+                _outputIndex = null;
                 _workflowTrackedSkills = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             }
             Initialize();
@@ -514,6 +506,16 @@ namespace UnitySkills
             if (underlying == typeof(bool)) return "boolean";
             if (underlying.IsArray) return "array";
             return "object";
+        }
+
+        /// <summary>
+        /// A parameter is truly required only if it has no default value and cannot accept null
+        /// (non-nullable value type). Reference types silently receive null when omitted.
+        /// </summary>
+        private static bool IsParameterRequired(ParameterInfo p)
+        {
+            if (p.HasDefaultValue) return false;
+            return p.ParameterType.IsValueType && Nullable.GetUnderlyingType(p.ParameterType) == null;
         }
 
         private static string[] FormatOperation(SkillOperation op)
@@ -737,12 +739,11 @@ namespace UnitySkills
             {
                 var (field, depth) = queue.Dequeue();
 
-                // Find all skills whose Outputs contain this field
-                foreach (var s in _skills.Values)
+                if (!_outputIndex.TryGetValue(field, out var fieldProducers))
+                    continue;
+
+                foreach (var s in fieldProducers)
                 {
-                    if (s.Outputs == null || !s.Outputs.Any(
-                        out_ => out_.Equals(field, StringComparison.OrdinalIgnoreCase)))
-                        continue;
 
                     producers.Add(new
                     {
@@ -824,7 +825,7 @@ namespace UnitySkills
                             typeErrors.Add(new { parameter = p.Name, expectedType = GetJsonType(p.ParameterType), error = ex.Message });
                         }
                     }
-                    else if (!p.HasDefaultValue && p.ParameterType.IsValueType && Nullable.GetUnderlyingType(p.ParameterType) == null)
+                    else if (IsParameterRequired(p))
                     {
                         missingParams.Add(p.Name);
                     }
@@ -833,7 +834,7 @@ namespace UnitySkills
                     {
                         name = p.Name,
                         type = GetJsonType(p.ParameterType),
-                        required = !p.HasDefaultValue && p.ParameterType.IsValueType && Nullable.GetUnderlyingType(p.ParameterType) == null,
+                        required = IsParameterRequired(p),
                         provided,
                         defaultValue = p.HasDefaultValue ? p.DefaultValue?.ToString() : null
                     });
@@ -914,7 +915,7 @@ namespace UnitySkills
 
         // ========== Query String Parser ==========
 
-        private static Dictionary<string, string> ParseQueryString(string qs)
+        internal static Dictionary<string, string> ParseQueryString(string qs)
         {
             var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (string.IsNullOrEmpty(qs)) return result;
