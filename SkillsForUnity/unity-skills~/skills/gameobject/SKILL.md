@@ -53,10 +53,12 @@ Create a new GameObject (primitive or empty).
 |-----------|------|----------|---------|-------------|
 | `name` | string | No | "GameObject" | Object name |
 | `primitiveType` | string | No | null | Cube/Sphere/Capsule/Cylinder/Plane/Quad (null=Empty) |
-| `x`, `y`, `z` | float | No | 0 | Position |
+| `x`, `y`, `z` | float | No | 0 | Local position (relative to parent if set) |
 | `parentName` | string | No | null | Parent object name |
+| `parentInstanceId` | int | No | 0 | Parent instance ID |
+| `parentPath` | string | No | null | Parent hierarchy path |
 
-**Returns**: `{success, name, instanceId, path, position}`
+**Returns**: `{success, name, instanceId, path, parent, position}`
 
 ### gameobject_delete
 Delete a GameObject.
@@ -163,13 +165,15 @@ Enable or disable a GameObject.
 ### gameobject_create_batch
 Create multiple GameObjects in one call.
 
+**Item properties**: `name`, `primitiveType`, `x`, `y`, `z`, `rotX`, `rotY`, `rotZ`, `scaleX`, `scaleY`, `scaleZ`, `parentName`, `parentInstanceId`, `parentPath`
+
 **Returns**: `{success, totalItems, successCount, failCount, results: [{success, name, instanceId, path, position}]}`
 
 ```python
 unity_skills.call_skill("gameobject_create_batch", items=[
-    {"name": "Cube1", "primitiveType": "Cube", "x": 0},
-    {"name": "Cube2", "primitiveType": "Cube", "x": 2},
-    {"name": "Cube3", "primitiveType": "Cube", "x": 4}
+    {"name": "Parent", "primitiveType": "Empty"},
+    {"name": "Child1", "primitiveType": "Cube", "x": 0, "parentName": "Parent"},
+    {"name": "Child2", "primitiveType": "Sphere", "x": 2, "parentName": "Parent"}
 ])
 ```
 

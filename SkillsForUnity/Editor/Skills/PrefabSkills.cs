@@ -43,8 +43,18 @@ namespace UnitySkills
             Outputs = new[] { "name", "instanceId" },
             RequiresInput = new[] { "prefabPath" },
             TracksWorkflow = true)]
-        public static object PrefabInstantiate(string prefabPath, float x = 0, float y = 0, float z = 0, string name = null)
+        public static object PrefabInstantiate(string prefabPath, float x = 0, float y = 0, float z = 0, string name = null,
+            string parentName = null, int parentInstanceId = 0, string parentPath = null)
         {
+            // Resolve parent first
+            GameObject parentGo = null;
+            if (!string.IsNullOrEmpty(parentName) || parentInstanceId != 0 || !string.IsNullOrEmpty(parentPath))
+            {
+                var (found, parentErr) = GameObjectFinder.FindOrError(parentName, parentInstanceId, parentPath);
+                if (parentErr != null) return parentErr;
+                parentGo = found;
+            }
+
             var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
             if (prefab == null)
                 return new { error = $"Prefab not found: {prefabPath}" };
@@ -52,7 +62,11 @@ namespace UnitySkills
             var instance = PrefabUtility.InstantiatePrefab(prefab) as GameObject;
             if (instance == null)
                 return new { error = $"Failed to instantiate prefab: {prefabPath}" };
-            instance.transform.position = new Vector3(x, y, z);
+
+            if (parentGo != null)
+                instance.transform.SetParent(parentGo.transform, false);
+
+            instance.transform.localPosition = new Vector3(x, y, z);
 
             if (!string.IsNullOrEmpty(name))
                 instance.name = name;
@@ -60,10 +74,10 @@ namespace UnitySkills
             Undo.RegisterCreatedObjectUndo(instance, "Instantiate Prefab");
             WorkflowManager.SnapshotObject(instance, SnapshotType.Created);
 
-            return new { success = true, name = instance.name, instanceId = instance.GetInstanceID() };
+            return new { success = true, name = instance.name, instanceId = instance.GetInstanceID(), path = GameObjectFinder.GetPath(instance) };
         }
 
-        [UnitySkill("prefab_instantiate_batch", "Instantiate multiple prefabs (Efficient). items: JSON array of {prefabPath, x, y, z, name, rotX, rotY, rotZ, scaleX, scaleY, scaleZ}",
+        [UnitySkill("prefab_instantiate_batch", "Instantiate multiple prefabs (Efficient). items: JSON array of {prefabPath, x, y, z, name, rotX, rotY, rotZ, scaleX, scaleY, scaleZ, parentName, parentInstanceId, parentPath}",
             Category = SkillCategory.Prefab, Operation = SkillOperation.Create,
             Tags = new[] { "prefab", "instantiate", "batch", "spawn", "scene" },
             Outputs = new[] { "results", "name", "instanceId", "position" },
@@ -99,7 +113,15 @@ namespace UnitySkills
                 var instance = PrefabUtility.InstantiatePrefab(prefab) as GameObject;
                 if (instance == null)
                     throw new System.Exception($"Failed to instantiate prefab: {item.prefabPath}");
-                instance.transform.position = new Vector3(item.x, item.y, item.z);
+                // Set parent if specified
+                if (!string.IsNullOrEmpty(item.parentName) || item.parentInstanceId != 0 || !string.IsNullOrEmpty(item.parentPath))
+                {
+                    var (parentGo, parentErr) = GameObjectFinder.FindOrError(item.parentName, item.parentInstanceId, item.parentPath);
+                    if (parentErr != null) throw new System.Exception($"Parent not found for '{item.name ?? item.prefabPath}'");
+                    instance.transform.SetParent(parentGo.transform, false);
+                }
+
+                instance.transform.localPosition = new Vector3(item.x, item.y, item.z);
 
                 if (item.rotX != 0 || item.rotY != 0 || item.rotZ != 0)
                     instance.transform.eulerAngles = new Vector3(item.rotX, item.rotY, item.rotZ);
@@ -135,6 +157,9 @@ namespace UnitySkills
             public float scaleX { get; set; } = 1;
             public float scaleY { get; set; } = 1;
             public float scaleZ { get; set; } = 1;
+            public string parentName { get; set; }
+            public int parentInstanceId { get; set; }
+            public string parentPath { get; set; }
         }
 
         [UnitySkill("prefab_apply", "Apply all overrides from prefab instance to the source prefab asset. Equivalent to prefab_apply_overrides.",

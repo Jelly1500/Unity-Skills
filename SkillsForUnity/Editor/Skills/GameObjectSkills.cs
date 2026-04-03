@@ -11,7 +11,7 @@ namespace UnitySkills
     /// </summary>
     public static class GameObjectSkills
     {
-        [UnitySkill("gameobject_create_batch", "Create multiple GameObjects in one call (Efficient). items: JSON array of {name, primitiveType, x, y, z}",
+        [UnitySkill("gameobject_create_batch", "Create multiple GameObjects in one call (Efficient). items: JSON array of {name, primitiveType, x, y, z, parentName, parentInstanceId, parentPath}",
             Category = SkillCategory.GameObject, Operation = SkillOperation.Create,
             Tags = new[] { "primitive", "empty", "hierarchy", "batch" },
             Outputs = new[] { "gameObject", "instanceId", "path", "position" },
@@ -41,7 +41,15 @@ namespace UnitySkills
                     throw new System.Exception($"Unknown primitive type: {primitiveType}");
                 }
 
-                go.transform.position = new Vector3(item.x, item.y, item.z);
+                // Set parent if specified
+                if (!string.IsNullOrEmpty(item.parentName) || item.parentInstanceId != 0 || !string.IsNullOrEmpty(item.parentPath))
+                {
+                    var (parentGo, parentErr) = GameObjectFinder.FindOrError(item.parentName, item.parentInstanceId, item.parentPath);
+                    if (parentErr != null) throw new System.Exception($"Parent not found for '{item.name}'");
+                    go.transform.SetParent(parentGo.transform, false);
+                }
+
+                go.transform.localPosition = new Vector3(item.x, item.y, item.z);
                 if (item.rotX != 0 || item.rotY != 0 || item.rotZ != 0)
                     go.transform.eulerAngles = new Vector3(item.rotX, item.rotY, item.rotZ);
                 if (item.scaleX != 1 || item.scaleY != 1 || item.scaleZ != 1)
@@ -74,6 +82,9 @@ namespace UnitySkills
             public float scaleX { get; set; } = 1;
             public float scaleY { get; set; } = 1;
             public float scaleZ { get; set; } = 1;
+            public string parentName { get; set; }
+            public int parentInstanceId { get; set; }
+            public string parentPath { get; set; }
         }
 
         [UnitySkill("gameobject_create", "Create a new GameObject. primitiveType: Cube, Sphere, Capsule, Cylinder, Plane, Quad, or Empty/null for empty object",
@@ -81,8 +92,18 @@ namespace UnitySkills
             Tags = new[] { "primitive", "empty", "hierarchy" },
             Outputs = new[] { "gameObject", "instanceId", "path", "position" },
             TracksWorkflow = true)]
-        public static object GameObjectCreate(string name, string primitiveType = null, float x = 0, float y = 0, float z = 0)
+        public static object GameObjectCreate(string name, string primitiveType = null, float x = 0, float y = 0, float z = 0,
+            string parentName = null, int parentInstanceId = 0, string parentPath = null)
         {
+            // Resolve parent first so we fail fast before creating the object
+            GameObject parentGo = null;
+            if (!string.IsNullOrEmpty(parentName) || parentInstanceId != 0 || !string.IsNullOrEmpty(parentPath))
+            {
+                var (found, parentErr) = GameObjectFinder.FindOrError(parentName, parentInstanceId, parentPath);
+                if (parentErr != null) return parentErr;
+                parentGo = found;
+            }
+
             GameObject go;
 
             // Support "Empty", "", or null to create an empty GameObject
@@ -103,7 +124,10 @@ namespace UnitySkills
                 return new { error = $"Unknown primitive type: {primitiveType}. Use: Cube, Sphere, Capsule, Cylinder, Plane, Quad, or Empty/None for empty object" };
             }
 
-            go.transform.position = new Vector3(x, y, z);
+            if (parentGo != null)
+                go.transform.SetParent(parentGo.transform, false);
+
+            go.transform.localPosition = new Vector3(x, y, z);
             Undo.RegisterCreatedObjectUndo(go, "Create " + name);
             WorkflowManager.SnapshotCreatedGameObject(go, primitiveType);
 
@@ -113,6 +137,7 @@ namespace UnitySkills
                 name = go.name,
                 instanceId = go.GetInstanceID(),
                 path = GameObjectFinder.GetPath(go),
+                parent = parentGo != null ? parentGo.name : "(root)",
                 position = new { x, y, z }
             };
         }
